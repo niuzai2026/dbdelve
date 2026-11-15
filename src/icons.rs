@@ -24,7 +24,7 @@ use crate::db::Syntax;
 /// The gpui-component widgets ask for their own paths — those are Lucide names
 /// too, so they resolve here as well. Add a row when something asks for one;
 /// an unlisted path simply draws nothing.
-const ICONS: [(&str, &IconData); 80] = [
+const ICONS: [(&str, &IconData); 81] = [
     ("icons/git-fork.svg", icondata_lu::LuGitFork),
     ("icons/chevron-down.svg", icondata_lu::LuChevronDown),
     ("icons/chevron-right.svg", icondata_lu::LuChevronRight),
@@ -56,6 +56,7 @@ const ICONS: [(&str, &IconData); 80] = [
     ("icons/layers.svg", icondata_lu::LuLayers),
     ("icons/eye.svg", icondata_lu::LuEye),
     ("icons/eye-off.svg", icondata_lu::LuEyeOff),
+    ("icons/lock.svg", icondata_lu::LuLock),
     ("icons/hard-drive.svg", icondata_lu::LuHardDrive),
     ("icons/globe.svg", icondata_lu::LuGlobe),
     ("icons/list-tree.svg", icondata_lu::LuListTree),
@@ -144,7 +145,7 @@ pub mod icon {
     pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
     pub const CHEVRON_LEFT: &str = "icons/chevron-left.svg";
     /// A connection's mode, on its pill in the titlebar.
-    pub const READ_ONLY: &str = "icons/eye.svg";
+    pub const READ_ONLY: &str = "icons/lock.svg";
     pub const READ_WRITE: &str = "icons/pencil.svg";
     pub const FULL_ACCESS: &str = "icons/shield-alert.svg";
     /// Folds the explorer column away, and brings it back.

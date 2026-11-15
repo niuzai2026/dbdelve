@@ -276,7 +276,7 @@ pub(crate) fn reconnect_button(id: &'static str, t: Theme) -> Button {
 /// `Selectable`, which `Div` does not implement.
 pub(crate) fn mode_pill(t: Theme, mode: Mode) -> Button {
     let (color, path) = match mode {
-        Mode::ReadOnly => (ConnectionColor::Green, icon::READ_ONLY),
+        Mode::ReadOnly => (ConnectionColor::Yellow, icon::READ_ONLY),
         Mode::ReadWrite => (ConnectionColor::Yellow, icon::READ_WRITE),
         Mode::Full => (ConnectionColor::Red, icon::FULL_ACCESS),
     };
