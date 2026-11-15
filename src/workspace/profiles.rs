@@ -5,14 +5,16 @@
 
 use super::*;
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::tree::{TreeEvent, TreeState};
 
 use crate::connection_form::{ConnectionTest, Reported, duplicate_profile_name, keep_schema};
-use crate::db::{ExternalConfig, Plugin};
+use crate::db::{ExternalConfig, PasswordCommand, Plugin};
 use crate::explorer::Shortcuts;
 use crate::import::{self, Source};
 use crate::session::{STALE_ROWS, restored_shortcuts};
 use crate::sql::{Destructive, Mode};
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The rows on an object tab were read from what the server held then. Their
@@ -205,6 +207,7 @@ impl Workspace {
             databases: Databases::default(),
             left_database: false,
             shortcuts: restored_shortcuts(&stored.folders, &stored.pins),
+            folds: stored.folds,
             session,
         });
         // The saved queries are listed before anything has connected.
@@ -262,6 +265,7 @@ impl Workspace {
             databases: Databases::default(),
             left_database: false,
             shortcuts: Shortcuts::default(),
+            folds: BTreeMap::new(),
             session,
         });
         if let Some(password) = password
@@ -658,6 +662,7 @@ impl Workspace {
         let color = form.color;
         let mode = form.mode;
         let shortcuts = form.shortcuts.clone();
+        let folds = form.folds.clone();
         let editing = form.editing.clone();
         let typed = form
             .naming_project
@@ -714,8 +719,9 @@ impl Workspace {
             None => {
                 let index =
                     self.create_profile(name, config, color, mode, Origin::Form, window, cx);
-                if shortcuts != Shortcuts::default() {
+                if shortcuts != Shortcuts::default() || !folds.is_empty() {
                     self.profiles[index].shortcuts = shortcuts;
+                    self.profiles[index].folds = folds;
                     self.remember_profiles(cx);
                     let id = self.profiles[index].id.clone();
                     self.refresh_query_library(&id, cx);
@@ -764,6 +770,7 @@ impl Workspace {
                 // A blank password on an existing profile means "keep the saved
                 // one", which is what the connect would use.
                 if let Some(id) = editing
+                    && config.password_command().is_none()
                     && let Some(slot) = config.password_mut()
                     && slot.is_empty()
                     && let Some(password) = store::password(&id)?
@@ -783,7 +790,10 @@ impl Workspace {
                 Ok(_) => tracing::info!(engine, ?elapsed, "connection test passed"),
                 Err(message) => {
                     tracing::info!(engine, ?elapsed, "connection test failed");
-                    tracing::debug!("connection test failed: {message}");
+                    tracing::debug!(
+                        "connection test failed: {}",
+                        crate::db::loggable_error(message)
+                    );
                 }
             }
             tested
@@ -1449,11 +1459,19 @@ impl Workspace {
         let Some(profile) = self.profile_mut() else {
             return;
         };
+        // The schema left behind was open only for being the active one, and
+        // would otherwise close under the user.
+        if let Some(leaving) = profile.active_schema().map(explorer::schema_row) {
+            profile.folds.entry(leaving).or_insert(true);
+        }
+        let picked = explorer::schema_row(&name);
+        profile.folds.insert(picked.clone(), true);
         let previous = profile.config.schema().map(str::to_string);
         profile.config.set_schema(Some(name.clone()));
         let (id, generation) = (profile.id.clone(), profile.generation);
         let connection = profile.connection();
         self.remember_profiles(cx);
+        self.rebuild_explorer_opening(&id, true, Some(picked), cx);
         cx.notify();
         let Some(connection) = connection else {
             return;
@@ -1741,12 +1759,19 @@ impl Workspace {
                         ?elapsed,
                         "connect failed"
                     );
-                    tracing::debug!(connection = number, "connect failed: {message}");
+                    tracing::debug!(
+                        connection = number,
+                        "connect failed: {}",
+                        crate::db::loggable_error(&message)
+                    );
                     message
                 };
                 // A file engine has nothing to authenticate to, so it never
-                // reaches the Keychain — and never triggers its prompt.
-                if let Some(slot) = config.password_mut()
+                // reaches the Keychain — and never triggers its prompt. Nor does
+                // a password command: a password saved before it is ignored,
+                // not deleted.
+                if config.password_command().is_none()
+                    && let Some(slot) = config.password_mut()
                     && slot.is_empty()
                 {
                     match store::password(&id) {
@@ -2132,6 +2157,49 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn collapse_all_schemas(
+        &mut self,
+        _: &CollapseAllSchemas,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fold_all_schemas(false, window, cx);
+    }
+
+    pub(crate) fn expand_all_schemas(
+        &mut self,
+        _: &ExpandAllSchemas,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fold_all_schemas(true, window, cx);
+    }
+
+    /// Every schema of the connection in front opened or closed and kept so;
+    /// Pinned, the folders and Queries stay as they are.
+    fn fold_all_schemas(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(profile) = self.profile_mut() else {
+            return;
+        };
+        let CatalogState::Loaded(catalog, _) = &profile.catalog else {
+            return;
+        };
+        let schemas = catalog.schemas.iter().map(|schema| schema.name.as_str());
+        profile
+            .folds
+            .extend(schemas.map(|name| (explorer::schema_row(name), open)));
+        // A filter opens every row it keeps, so under one nothing would close.
+        // Opening needs no such clearing, and the user's filter stays.
+        let filter = profile.session.explorer_filter.clone();
+        if !open && !filter.read(cx).value().is_empty() {
+            filter.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        let id = profile.id.clone();
+        self.remember_profiles(cx);
+        self.rebuild_explorer(&id, true, cx);
+        cx.notify();
+    }
+
     pub(crate) fn refresh_explorer(&mut self, id: &str, cx: &mut Context<Self>) {
         self.rebuild_explorer(id, false, cx);
     }
@@ -2143,7 +2211,61 @@ impl Workspace {
         self.rebuild_explorer(id, true, cx);
     }
 
+    /// A top-level row of the sidebar the user opened or closed, kept for the
+    /// next launch. Not under a filter, which opens every row it keeps
+    /// whatever the user left them as.
+    // ponytail: only top-level rows are kept, so a category or partitioned
+    // table folded inside a schema opens again on the next launch. Their ids
+    // are name-based too; keeping them means dropping the root check here and
+    // applying nested ids where `root_folds` applies these.
+    pub(crate) fn remember_fold(
+        &mut self,
+        id: &str,
+        tree: &Entity<TreeState>,
+        event: &TreeEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let (row, open) = match event {
+            TreeEvent::Expanded(row) => (row, true),
+            TreeEvent::Collapsed(row) => (row, false),
+        };
+        let state = tree.read(cx);
+        let root = state
+            .index_of(row)
+            .and_then(|ix| state.entry(ix))
+            .is_some_and(|entry| entry.is_root());
+        let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) else {
+            return;
+        };
+        if !root
+            || !profile
+                .session
+                .explorer_filter
+                .read(cx)
+                .value()
+                .trim()
+                .is_empty()
+        {
+            return;
+        }
+        if profile.folds.insert(row.to_string(), open) != Some(open) {
+            self.remember_profiles(cx);
+        }
+    }
+
     fn rebuild_explorer(&mut self, id: &str, keep: bool, cx: &mut Context<Self>) {
+        self.rebuild_explorer_opening(id, keep, None, cx);
+    }
+
+    /// `rebuild_explorer`, with the row `opening` open whatever was kept,
+    /// even under a filter, which otherwise keeps how each row was left.
+    fn rebuild_explorer_opening(
+        &mut self,
+        id: &str,
+        keep: bool,
+        opening: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
@@ -2165,7 +2287,7 @@ impl Workspace {
         }
         let front = profile.front_row();
         let tree = profile.session.explorer_tree.clone();
-        let (items, selected) = match keep {
+        let (mut folds, selected) = match keep {
             true => {
                 let state = tree.read(cx);
                 let roots: Vec<_> = (0..)
@@ -2174,13 +2296,23 @@ impl Workspace {
                     .map(|entry| entry.item().clone())
                     .collect();
                 let selected = state.selected_item().map(|item| item.id.clone());
-                (
-                    explorer::with_folds(explorer.items, &explorer::folds(&roots)),
-                    selected,
-                )
+                (explorer::folds(&roots), selected)
             }
-            false => (explorer.items, None),
+            false => (HashMap::new(), None),
         };
+        // Over what was kept: every fold of a top-level row made without a
+        // filter is in `profile.folds` already, and a change made to them
+        // there, Collapse All Schemas's, has to show. A filter opens every row
+        // it keeps, so that what matched shows.
+        if filter.trim().is_empty() {
+            folds.extend(explorer::root_folds(
+                &explorer.items,
+                &profile.folds,
+                profile.explorer_opens_on().as_deref(),
+            ));
+        }
+        folds.extend(opening.map(|row| (row, true)));
+        let items = explorer::with_folds(explorer.items, &folds);
 
         let shortcuts = Arc::new(explorer.shortcuts);
         if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
@@ -2448,6 +2580,7 @@ fn stored_config(
                 user: stored.user.clone(),
                 // Never on disk. Read from the Keychain when connecting.
                 password: String::new(),
+                password_command: stored_password_command(stored, engine),
                 sslmode,
                 root_certificate: stored.root_certificate.clone(),
                 statement_timeout: stored.statement_timeout.unwrap_or_default(),
@@ -2488,6 +2621,21 @@ fn stored_config(
             schema: stored.schema.clone(),
         }),
     }
+}
+
+/// A hand-edited file can give a command to an engine whose login never runs
+/// one; dropped there, so the next save does not carry it on.
+fn stored_password_command(
+    stored: &store::StoredProfile,
+    engine: Engine,
+) -> Option<PasswordCommand> {
+    let command = stored.password_command.as_ref()?;
+    (Target::built_in(engine).takes_password_command() && !command.trim().is_empty()).then(|| {
+        PasswordCommand {
+            command: command.clone(),
+            expires: stored.password_expires.unwrap_or_default(),
+        }
+    })
 }
 
 /// Whether picking `name` would leave the profile where it is. A blank
@@ -2834,6 +2982,41 @@ mod tests {
             stored_config(&file("database = ''"), Engine::DuckDb, SslMode::default()),
             ConnectionConfig::duckdb("/data/dev.duckdb".into(), 0)
         );
+    }
+
+    #[test]
+    fn a_password_command_restores_only_where_the_login_runs_one() {
+        let file = |fields: &str| -> store::StoredProfile {
+            toml::from_str(&format!(
+                "id = 'dev'\nname = 'Dev'\nhost = 'db.internal'\nuser = 'ada'\n\
+                 database = 'orders'\n{fields}"
+            ))
+            .expect("a profile")
+        };
+        let restored = |fields: &str, engine| {
+            stored_config(&file(fields), engine, SslMode::default())
+                .server()
+                .and_then(|server| server.password_command.clone())
+        };
+        let command = "password_command = 'printf %s token'";
+        assert_eq!(
+            restored(
+                &format!("{command}\npassword_expires = 900"),
+                Engine::Postgres
+            ),
+            Some(PasswordCommand {
+                command: "printf %s token".into(),
+                expires: 900,
+            })
+        );
+        // No expiry is every login.
+        assert_eq!(
+            restored(command, Engine::Redis).map(|command| command.expires),
+            Some(0)
+        );
+        // MongoDB's driver redials with what it parsed at connect.
+        assert_eq!(restored(command, Engine::MongoDb), None);
+        assert_eq!(restored("password_command = '  '", Engine::Postgres), None);
     }
 
     #[test]

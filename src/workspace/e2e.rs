@@ -544,6 +544,80 @@ fn the_sidebar_takes_the_keyboard_and_escape_hands_it_back(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn a_schema_folded_without_a_filter_is_saved_and_collapse_all_closes_it(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let (workspace, cx) = launch_on_sqlite_holding(cx, "create table birds (name text);");
+        let filter_to = |text: &'static str, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let profile = workspace.profile().unwrap();
+                    let (id, filter) =
+                        (profile.id.clone(), profile.session.explorer_filter.clone());
+                    filter.update(cx, |input, cx| input.set_value(text, window, cx));
+                    workspace.refresh_explorer(&id, cx);
+                });
+            });
+        };
+        let fold_schema = |cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes("secondary-k e");
+            settle(cx);
+            cx.simulate_keystrokes("enter");
+            settle(cx);
+        };
+        let schema_open = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                let tree = &workspace.read(cx).profile().unwrap().session.explorer_tree;
+                tree.read(cx).entry(0).unwrap().is_expanded()
+            })
+        };
+        let saved = || {
+            store::peek_profiles(&[]).unwrap().profiles[0]
+                .folds
+                .get("schema-main")
+                .copied()
+        };
+
+        filter_to("birds", cx);
+        fold_schema(cx);
+        assert!(!schema_open(cx));
+        assert_eq!(saved(), None);
+        filter_to("", cx);
+        assert!(schema_open(cx), "the only schema, opened by default");
+
+        fold_schema(cx);
+        assert!(!schema_open(cx));
+        assert_eq!(saved(), Some(false));
+
+        // Picked as the active schema while folded under a filter, it opens
+        // there and then, not once the filter is cleared.
+        filter_to("birds", cx);
+        fold_schema(cx);
+        assert!(!schema_open(cx));
+        workspace.update(cx, |workspace, cx| workspace.set_schema("main".into(), cx));
+        settle(cx);
+        assert!(schema_open(cx));
+        assert_eq!(saved(), Some(true));
+
+        cx.dispatch_action(crate::actions::CollapseAllSchemas);
+        settle(cx);
+        let filter = cx.update(|_, cx| {
+            let session = &workspace.read(cx).profile().unwrap().session;
+            session.explorer_filter.read(cx).value().to_string()
+        });
+        assert_eq!(filter, "", "a filter would have held the schema open");
+        assert!(!schema_open(cx));
+        assert_eq!(saved(), Some(false));
+
+        cx.dispatch_action(crate::actions::ExpandAllSchemas);
+        settle(cx);
+        assert!(schema_open(cx));
+        assert_eq!(saved(), Some(true));
+
+        quit(workspace, cx);
+    });
+}
+
+#[gpui::test]
 fn enter_opens_a_sidebar_row_and_its_structure_takes_the_keyboard(cx: &mut TestAppContext) {
     store::tests::with_home(|| {
         let (workspace, cx) = launch_on_sqlite_holding(
@@ -2437,6 +2511,103 @@ fn an_odbc_profile_saves_and_restores_as_it_was(cx: &mut TestAppContext) {
             });
         });
         assert_eq!(cx.update(|_, cx| external(workspace.read(cx))), restored);
+
+        quit(workspace, cx);
+    });
+}
+
+/// Through the real restore, the edit form and the real save: a password
+/// command comes back as written, disables the Password field while it is
+/// there, and is dropped from an engine whose login never runs one.
+#[gpui::test]
+fn a_password_command_restores_into_the_edit_form_and_saves_back(cx: &mut TestAppContext) {
+    store::tests::with_home(|| {
+        let directory = store::dbdelve_directory().unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        // A SQLite profile in front, since launching connects the active one
+        // and a server profile would reach for its login.
+        let database = directory.join("e2e.db");
+        std::fs::write(&database, b"").unwrap();
+        let command = "aws rds generate-db-auth-token --hostname %HOSTNAME% --username %USERNAME%";
+        let server = |id: &str, engine: &str| {
+            format!(
+                "[[profiles]]\nid = \"{id}\"\nname = \"{id}\"\nhost = \"db.internal\"\n\
+                 database = \"d\"\nuser = \"u\"\nengine = \"{engine}\"\n\
+                 password_command = {command:?}\npassword_expires = 900\n"
+            )
+        };
+        std::fs::write(
+            directory.join("profiles.toml"),
+            format!(
+                "active = \"e2e\"\n\
+                 [settings]\ncheck_for_updates = false\n\
+                 [[profiles]]\nid = \"e2e\"\nname = \"E2E\"\nhost = \"\"\ndatabase = \"\"\n\
+                 user = \"\"\nengine = \"sqlite\"\npath = {:?}\n{}{}",
+                database.display().to_string(),
+                server("rds", "postgres"),
+                server("mongo", "mongodb"),
+            ),
+        )
+        .unwrap();
+
+        let (workspace, cx) = launch(cx);
+        let rds = cx.update(|_, cx| {
+            workspace
+                .read(cx)
+                .profiles
+                .iter()
+                .position(|profile| profile.id == "rds")
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| workspace.edit_profile(rds, window, cx));
+        });
+        settle(cx);
+        cx.update(|_, cx| {
+            let form = workspace.read(cx).form.as_ref().expect("the form is open");
+            assert_eq!(form.password_command.read(cx).value(), command);
+            assert_eq!(form.password_expires.read(cx).value(), "900");
+            let password = form.password.read(cx).presentation();
+            assert!(password.is_disabled());
+            assert_eq!(password.placeholder(), "From the command");
+            let (_, config) = form.config(cx).unwrap();
+            assert_eq!(
+                config.password_command(),
+                Some(&crate::db::PasswordCommand {
+                    command: command.into(),
+                    expires: 900,
+                })
+            );
+            assert_eq!(config.password(), Some(""));
+        });
+
+        // Cleared, the Password field is the profile's own again.
+        cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let form = workspace.form.as_ref().unwrap();
+                form.password_command
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                cx.notify();
+            });
+        });
+        settle(cx);
+        cx.update(|_, cx| {
+            let form = workspace.read(cx).form.as_ref().unwrap();
+            let password = form.password.read(cx).presentation();
+            assert!(!password.is_disabled());
+            assert_eq!(password.placeholder(), "Unchanged");
+            assert_eq!(form.config(cx).unwrap().1.password_command(), None);
+        });
+
+        cx.update(|_, cx| workspace.update(cx, |workspace, cx| workspace.remember_profiles(cx)));
+        let saved = std::fs::read_to_string(directory.join("profiles.toml")).unwrap();
+        let list = store::decode_profiles(&saved, &[]).unwrap();
+        let written = |id: &str| {
+            let stored = list.profiles.iter().find(|stored| stored.id == id).unwrap();
+            (stored.password_command.as_deref(), stored.password_expires)
+        };
+        assert_eq!(written("rds"), (Some(command), Some(900)));
+        assert_eq!(written("mongo"), (None, None));
 
         quit(workspace, cx);
     });

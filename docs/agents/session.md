@@ -445,6 +445,35 @@ The shape a change to the main pane has to fit (`session.rs`, with the
   lands where no row takes it, and an object dragged while its database is
   unknown carries nothing. The Pinned group exists only while something is
   pinned, so pinning the first thing is the menu's.
+- **The sidebar opens on the active schema and keeps the user's folds.** A
+  schema row starts open only when it is the schema the connection works in
+  (`Profile::explorer_opens_on`): `Profile::active_schema`, or, where
+  `Target::catalog_lists_databases` (MySQL, MariaDB, ClickHouse, whose
+  schema rows are databases), the row named like `Profile::active_database`.
+  Gated on that ability rather than matched by name everywhere, so a schema
+  sharing the database's name on another engine is not taken for it. When
+  neither names a listed row, the only schema there is opens. So a database
+  of many schemas is not a wall of open trees, and one of a single schema is
+  not a lone closed row. Every other schema starts closed, and every row
+  that is not a schema (Pinned, folders, Queries) open
+  (`explorer::root_folds`). Opening or closing a top-level row (a schema, a
+  folder, Pinned, Queries) is recorded from the tree's own `TreeEvent` (`Workspace::remember_fold`), keyboard, click and
+  `reveal_item` alike, in the profile's `folds`, row id to open, saved as
+  `[profiles.folds]` and left out when empty. A row it does not name gets the
+  default, so a schema created since stays closed and a new folder opens.
+  Every rebuild without a filter puts `folds` over what was kept, which is
+  how Collapse All and Expand All Schemas (the filter row's buttons and the
+  palette, no default chords) and Set as Active Schema show at once: Set as Active Schema
+  records the schema it picks as open and the one it leaves as it was, since
+  that one was open only for being active, and its rebuild opens the picked
+  row over what was kept, so it opens under a filter too. Nothing is recorded while the
+  filter has text: a filter opens every row it keeps so that matches show,
+  and those are not the user's folds. Clearing it rebuilds from `folds` and
+  the defaults; Collapse All Schemas clears it first, or nothing would close;
+  Expand All leaves it.
+  Category folds are kept across a refresh but not saved. Stale ids are left
+  in `folds`: harmless, and a dropped schema may come back. A duplicate takes
+  the folds with the folders.
 - **A named buffer persists to its query file, an unnamed one to its own
   `.scratch-{id}.sql`.** Edits stay in memory until Save, a connection switch,
   opening another query, or normal quit/window close persists the buffers.
@@ -494,10 +523,15 @@ The shape a change to the main pane has to fit (`session.rs`, with the
 ## Completion
 
 `src/completion.rs` offers the schemas, relations and routines the loaded
-catalog holds, the columns of the relations a statement actually names, and the
-keywords that carry a statement's shape. It is a `CompletionProvider`
-implementation and nothing else: the popup, its scroll and its keys all belong
-to gpui-component.
+catalog holds, the columns of the relations a statement actually names, the
+keywords that carry a statement's shape, and the dialect's built-in functions
+and values. It is a `CompletionProvider` implementation and nothing else: the
+popup, its scroll and its keys all belong to gpui-component.
+
+The built-ins are data, one table per dialect under `src/db/builtins/` read
+through `Engine::builtins`, offered wherever keywords are and never where a
+relation belongs; a keyword spelled like one is offered once, as the built-in,
+which writes a function up to its open parenthesis and a value bare.
 
 **Columns are not in the catalog, and must not be put there.** Fetching every
 column of every relation at connect is unbounded: on a large schema it is a
@@ -604,6 +638,13 @@ the form first, finds no handler there and lets it through
 (`keybindings::INERT_IN` is what tells the conflict check so). **Test** opens
 the connection the way **Connect** would (keychain password, Read-only hold)
 and throws it away, so a profile can be checked before it is saved.
+Where `Target::takes_password_command`, Password command and Expires after
+sit under Password, always drawn for those engines so neither leaves the screen
+holding focus. While the command holds anything, Password is disabled with
+"From the command" as its placeholder; what was typed in it stays but is not
+read, so the config's password is blank and nothing reaches the Keychain. The
+command is stored as typed (`password_command`, `password_expires` in
+`profiles.toml`), and restore drops one from an engine that does not take it.
 
 **The ODBC tile** is one tile per discovered plugin (`Target::tiles`, after the
 built-ins, wearing one generic plug icon), shown only when the bridge is
