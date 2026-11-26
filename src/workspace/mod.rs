@@ -2238,6 +2238,23 @@ impl Render for Workspace {
                         })
                         .into_any_element()
                 })
+                // Right of the mode pill, before anything pushed to the far
+                // end: the button belongs with the row's leading cluster. The
+                // wrapper occludes: the strip behind is the window-drag region,
+                // and without a blocking hitbox the platform reads every click
+                // here as a caption press and the button never sees it.
+                .chain(std::iter::once(
+                    div()
+                        .occlude()
+                        .child(
+                            icon_button("new-query", icon::PLUS, Tone::Quiet, Control::Compact, t)
+                                .tooltip_with_action("New query", &NewQuery, None)
+                                .on_click(cx.listener(|workspace, _, window, cx| {
+                                    workspace.new_query(&NewQuery, window, cx);
+                                })),
+                        )
+                        .into_any_element(),
+                ))
                 .chain(newer_release.map(|release| {
                     // On a wrapper: `dropdown_menu` wraps the button, so a
                     // margin on the button never reaches the titlebar's row.

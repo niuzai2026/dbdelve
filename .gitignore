@@ -37,3 +37,4 @@ docs/superpowers/
 # insta's pending output while a snapshot is being reviewed.
 *.snap.new
 *.pending-snap
+.idea

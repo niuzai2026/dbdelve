@@ -37,8 +37,8 @@ use crate::{
     InsertForm, TabKey, Workspace,
     actions::{
         AcceptCompletion, AddFilter, CancelQuery, CopyCell, CopySelection, CustomRowLimit,
-        ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewQuery,
-        NewRow, NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
+        ExplainQuery, FormatQuery, ImportRows, ImportRowsFromClipboard, LimitTarget, NewRow,
+        NextPage, PreviousPage, RemoveFilter, RunQuery, SaveQuery, SetDefaultRowLimit,
         SetFilterColumn, SetFilterOperator, SetFilterRaw, SetQueryLimit, SetRowLimit,
         ToggleComment, ToggleFilterJoin, ToggleNextJoin, ToggleRowPanel,
     },
@@ -3356,8 +3356,6 @@ fn render_tab_strip(
     .filter(|&(_, percent, shown)| shown && percent != 100)
     .map(|(pane, percent, _)| format!("{pane} {percent}%"))
     .collect();
-    let new_workspace = workspace.clone();
-
     div()
         .h(px(layout::chrome(layout::TAB_HEIGHT)))
         .w_full()
@@ -3403,25 +3401,6 @@ fn render_tab_strip(
                     }
                 })
                 .children(tabs),
-        )
-        .child(
-            // Outside the scrolling strip and shrink-proof, so a strip full
-            // enough to scroll never scrolls this out of reach with it.
-            div().flex_shrink_0().child(
-                icon_button(
-                    "new-query-tab",
-                    icon::PLUS,
-                    Tone::Quiet,
-                    Control::Compact,
-                    t,
-                )
-                .tooltip_with_action("New query", &NewQuery, None)
-                .on_click(move |_, window, cx| {
-                    _ = new_workspace.update(cx, |workspace, cx| {
-                        workspace.new_query(&NewQuery, window, cx);
-                    });
-                }),
-            ),
         )
         .children((!zoom.is_empty()).then(|| {
             div()

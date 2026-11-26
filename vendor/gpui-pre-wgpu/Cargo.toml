@@ -169,6 +169,23 @@ default-features = false
 version = "29.0"
 features = ["wgsl-in"]
 
+# dbdelve patch: vendoring dropped the upstream dev-dependency, but the
+# cfg(test) headless-renderer code and its tests read `image::RgbaImage`.
+# Pinned to the version already locked, so naming it adds no copy.
+[dev-dependencies.image]
+version = "0.25"
+default-features = false
+
+# dbdelve patch: the cfg(test) renderer code impls `gpui::PlatformHeadlessRenderer`,
+# which gpui-pre exports only under test-support. Features unify across dep and
+# dev-dep at test time, so naming the same pinned crate here is what the root
+# package's own dev-dependency does.
+[dev-dependencies.gpui]
+version = "=0.3.9"
+package = "gpui-pre"
+default-features = false
+features = ["test-support"]
+
 [lints.clippy]
 dbg_macro = "deny"
 declare_interior_mutable_const = "deny"
